@@ -126,31 +126,25 @@ public class MainActivity extends Activity {
                 c.disconnect();
 
                 JSONObject root = new JSONObject(out.toString("UTF-8"));
-                JSONObject metadata = root.optJSONObject("apps");
-                if (metadata == null) metadata = root.optJSONObject("packages");
-                if (metadata == null) throw new Exception("The F-Droid index format was not recognized.");
-
                 List<AppEntry> loaded = new ArrayList<>();
-                JSONArray names = metadata.names();
-                if (names != null) {
-                    for (int i = 0; i < names.length(); i++) {
-                        String id = names.optString(i);
-                        JSONObject a = metadata.optJSONObject(id);
-                        if (a == null) continue;
-                        AppEntry e = new AppEntry();
-                        e.id = id;
-                        e.name = first(a, "name", id);
-                        e.summary = first(a, "summary", "");
-                        e.description = first(a, "description", e.summary);
-                        e.icon = first(a, "icon", "");
-                        e.web = first(a, "web", "");
-                        e.source = first(a, "source", "");
-                        e.tracker = first(a, "tracker", "");
-                        e.donate = first(a, "donate", "");
-                        e.license = first(a, "license", "");
-                        loaded.add(e);
+                JSONArray appArray = root.optJSONArray("apps");
+                if (appArray != null) {
+                    for (int i = 0; i < appArray.length(); i++) {
+                        JSONObject a = appArray.optJSONObject(i);
+                        if (a != null) loaded.add(parseApp(a));
+                    }
+                } else {
+                    JSONObject appObject = root.optJSONObject("apps");
+                    if (appObject != null) {
+                        JSONArray ids = appObject.names();
+                        if (ids != null) for (int i = 0; i < ids.length(); i++) {
+                            String id = ids.optString(i);
+                            JSONObject a = appObject.optJSONObject(id);
+                            if (a != null) loaded.add(parseApp(a, id));
+                        }
                     }
                 }
+                if (loaded.isEmpty()) throw new Exception("No app metadata found in the F-Droid index.");
                 Collections.sort(loaded, Comparator.comparing(x -> x.name.toLowerCase(Locale.ROOT)));
                 runOnUiThread(() -> {
                     apps.clear();
@@ -168,6 +162,25 @@ public class MainActivity extends Activity {
                 });
             }
         });
+    }
+
+    private static AppEntry parseApp(JSONObject a) {
+        return parseApp(a, first(a, "packageName", ""));
+    }
+
+    private static AppEntry parseApp(JSONObject a, String fallbackId) {
+        AppEntry e = new AppEntry();
+        e.id = first(a, "packageName", fallbackId);
+        e.name = first(a, "name", e.id);
+        e.summary = first(a, "summary", "");
+        e.description = first(a, "description", e.summary);
+        e.icon = first(a, "icon", "");
+        e.web = first(a, "web", "");
+        e.source = first(a, "source", "");
+        e.tracker = first(a, "tracker", "");
+        e.donate = first(a, "donate", "");
+        e.license = first(a, "license", "");
+        return e;
     }
 
     private static String first(JSONObject o, String key, String fallback) {
