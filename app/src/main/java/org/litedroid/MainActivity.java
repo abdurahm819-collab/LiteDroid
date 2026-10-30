@@ -78,7 +78,7 @@ public class MainActivity extends Activity {
     static class AppEntry {
         String id="", name="", summary="", description="", icon="";
         String web="", source="", tracker="", donate="", license="";
-        String apkUrl="";
+        String apkUrl="", versionName="";\n        long versionCode=0;
         final List<String> screenshots = new ArrayList<>();
     }
 
@@ -194,33 +194,14 @@ public class MainActivity extends Activity {
         progress.setVisibility(View.VISIBLE);
         status.setText("Searching for “" + query + "”…");
         worker.execute(() -> {
-            HttpURLConnection connection = null;
             try {
-                URL url = new URL(SEARCH_URL + URLEncoder.encode(query, "UTF-8"));
-                connection = (HttpURLConnection) url.openConnection();
-                connection.setConnectTimeout(10000);
-                connection.setReadTimeout(15000);
-                connection.setRequestProperty("User-Agent", "LiteDroid/1.3");
-                connection.setRequestProperty("Accept", "application/json");
-                int response = connection.getResponseCode();
-                if (response != HttpURLConnection.HTTP_OK) throw new Exception("F-Droid search returned HTTP " + response);
-                byte[] bytes = readLimited(connection.getInputStream(), 3 * 1024 * 1024);
-                Object json = new org.json.JSONTokener(new String(bytes, "UTF-8")).nextValue();
-                JSONArray results = findResults(json);
-                if (results == null) throw new Exception("Unexpected F-Droid search response.");
-                List<AppEntry> found = new ArrayList<>();
-                for (int i = 0; i < results.length(); i++) {
-                    JSONObject item = results.optJSONObject(i);
-                    if (item == null) continue;
-                    AppEntry app = parseSearchResult(item);
-                    if (!app.id.isEmpty() || !app.name.isEmpty()) found.add(app);
-                }
+                List<AppEntry> found = fetchSearchPages(query);
                 runOnUiThread(() -> {
                     if (requestId != latestRequest.get()) return;
                     apps.clear();
                     apps.addAll(found);
                     progress.setVisibility(View.GONE);
-                    status.setText(found.size() + " results · Official F-Droid search");
+                    status.setText(found.size() + " results · F-Droid search (offset test)");
                     adapter.notifyDataSetChanged();
                 });
             } catch (Exception e) {
@@ -231,10 +212,49 @@ public class MainActivity extends Activity {
                     status.setText("Search failed. Check your connection and try again.");
                     Toast.makeText(this, message, Toast.LENGTH_LONG).show();
                 });
-            } finally {
-                if (connection != null) connection.disconnect();
             }
         });
+    }
+
+    private List<AppEntry> fetchSearchPages(String query) throws Exception {
+        List<AppEntry> combined = new ArrayList<>();
+        java.util.HashSet<String> seen = new java.util.HashSet<>();
+        // The public F-Droid docs only show q=. Probe common offsets experimentally.
+        int[] offsets = {0, 10, 20, 30, 40};
+        for (int offset : offsets) {
+            HttpURLConnection c = null;
+            try {
+                String address = SEARCH_URL + URLEncoder.encode(query, "UTF-8") + "&offset=" + offset;
+                c = (HttpURLConnection) new URL(address).openConnection();
+                c.setConnectTimeout(10000);
+                c.setReadTimeout(15000);
+                c.setRequestProperty("User-Agent", "LiteDroid/1.4");
+                c.setRequestProperty("Accept", "application/json");
+                int response = c.getResponseCode();
+                if (response != HttpURLConnection.HTTP_OK) {
+                    if (offset == 0) throw new Exception("F-Droid search returned HTTP " + response);
+                    break;
+                }
+                byte[] bytes = readLimited(c.getInputStream(), 3 * 1024 * 1024);
+                Object json = new org.json.JSONTokener(new String(bytes, "UTF-8")).nextValue();
+                JSONArray results = findResults(json);
+                if (results == null) throw new Exception("Unexpected F-Droid search response.");
+                int added = 0;
+                for (int i = 0; i < results.length(); i++) {
+                    JSONObject item = results.optJSONObject(i);
+                    if (item == null) continue;
+                    AppEntry app = parseSearchResult(item);
+                    if (app.id.isEmpty() && app.name.isEmpty()) continue;
+                    String key = app.id.isEmpty() ? app.name.toLowerCase(Locale.ROOT) : app.id;
+                    if (seen.add(key)) { combined.add(app); added++; }
+                }
+                // If offset is ignored, the first duplicate-only page ends probing.
+                if (results.length() == 0 || added == 0 || results.length() < 10) break;
+            } finally {
+                if (c != null) c.disconnect();
+            }
+        }
+        return combined;
     }
 
     private static byte[] readLimited(InputStream in, int max) throws Exception {
@@ -484,16 +504,16 @@ public class MainActivity extends Activity {
 
         worker.execute(() -> {
             try {
+                fetchOfficialPackageInfo(app);
                 String html = fetchText(PACKAGE_PAGE + Uri.encode(app.id));
-                app.apkUrl = findApkUrl(html);
-                List<String> images = findScreenshots(html);
+                List<String> images = findScreenshots(html, app.id);
                 app.screenshots.clear();
                 app.screenshots.addAll(images);
                 runOnUiThread(() -> {
                     if (!detailsVisible) return;
                     apkStatus.setText(app.apkUrl.isEmpty()
-                            ? "No direct APK was found on the official app page."
-                            : "Latest APK found on the official F-Droid repository.");
+                            ? "F-Droid has no downloadable APK listed for this app."
+                            : "Latest official version: " + app.versionName + " (code " + app.versionCode + ").");
                     download.setEnabled(!app.apkUrl.isEmpty());
                     if (!images.isEmpty()) {
                         screenshotLabel.setVisibility(View.VISIBLE);
@@ -527,30 +547,56 @@ public class MainActivity extends Activity {
         } finally { c.disconnect(); }
     }
 
-    private static String findApkUrl(String html) {
-        Matcher m = Pattern.compile("(?i)href\\s*=\\s*['\"]([^'\"]+\\.apk(?:\\?[^'\"]*)?)['\"]").matcher(html);
-        while (m.find()) {
-            String url = absoluteUrl(m.group(1));
-            try {
-                Uri uri = Uri.parse(url);
-                if ("https".equals(uri.getScheme()) && "f-droid.org".equalsIgnoreCase(uri.getHost())) return url;
-            } catch (Exception ignored) {}
+    private void fetchOfficialPackageInfo(AppEntry app) throws Exception {
+        if (!app.id.matches("[A-Za-z0-9_]+(\\\\.[A-Za-z0-9_]+)+")) {
+            throw new Exception("Invalid F-Droid package ID.");
         }
-        return "";
+        String jsonText = fetchText("https://f-droid.org/api/v1/packages/" + Uri.encode(app.id));
+        JSONObject root = new JSONObject(jsonText);
+        long suggested = root.optLong("suggestedVersionCode", -1);
+        JSONArray versions = root.optJSONArray("packages");
+        if (versions == null || versions.length() == 0) {
+            throw new Exception("F-Droid lists no downloadable versions for this app.");
+        }
+        JSONObject selected = null;
+        for (int i = 0; i < versions.length(); i++) {
+            JSONObject candidate = versions.optJSONObject(i);
+            if (candidate != null && candidate.optLong("versionCode", -2) == suggested) {
+                selected = candidate;
+                break;
+            }
+        }
+        if (selected == null) selected = versions.optJSONObject(0);
+        if (selected == null) throw new Exception("F-Droid version information is incomplete.");
+        app.versionName = selected.optString("versionName", "Latest");
+        app.versionCode = selected.optLong("versionCode", 0);
+        if (app.versionCode <= 0) throw new Exception("F-Droid did not provide a valid version code.");
+        String apkName = selected.optString("apkName", app.id + "_" + app.versionCode + ".apk");
+        if (apkName.contains("/") || apkName.contains("..") || !apkName.endsWith(".apk")) {
+            throw new Exception("F-Droid returned an invalid APK filename.");
+        }
+        app.apkUrl = "https://f-droid.org/repo/" + apkName;
     }
 
-    private static List<String> findScreenshots(String html) {
+    private static List<String> findScreenshots(String html, String packageId) {
         List<String> result = new ArrayList<>();
-        Matcher tags = Pattern.compile("(?is)<img\\b[^>]*>").matcher(html);
-        while (tags.find() && result.size() < 5) {
-            String tag = tags.group();
-            String src = attribute(tag, "src");
-            if (src.isEmpty()) src = attribute(tag, "data-src");
+        int start = html.indexOf("id=\\\"screenshots\\\"");
+        if (start < 0) start = html.indexOf("id='screenshots'");
+        if (start < 0) return result;
+        int end = html.indexOf("class=\\\"package-versions", start);
+        if (end < 0) end = Math.min(html.length(), start + 20000);
+        String gallery = html.substring(start, end);
+        Matcher tags = Pattern.compile("(?is)<img\\\\b[^>]*>").matcher(gallery);
+        String expectedPrefix = "https://f-droid.org/repo/" + packageId + "/";
+        while (tags.find() && result.size() < 8) {
+            String src = attribute(tags.group(), "src");
+            if (src.isEmpty()) src = attribute(tags.group(), "data-src");
             if (src.isEmpty()) continue;
-            String lower = src.toLowerCase(Locale.ROOT);
-            if (lower.contains("icon") || lower.contains("logo") || lower.endsWith(".svg")) continue;
             String url = absoluteUrl(src);
-            if (url.startsWith("https://")) result.add(url);
+            String lower = url.toLowerCase(Locale.ROOT);
+            if (url.startsWith(expectedPrefix) &&
+                    (lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".jpeg")) &&
+                    !result.contains(url)) result.add(url);
         }
         return result;
     }
