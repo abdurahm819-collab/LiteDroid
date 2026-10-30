@@ -252,14 +252,68 @@ public class MainActivity extends Activity {
 
     private static class SearchPage { final List<AppEntry> apps; final boolean hasMore; SearchPage(List<AppEntry> apps,boolean hasMore){this.apps=apps;this.hasMore=hasMore;} }
     private SearchPage fetchSearchPage(String query,int page) throws Exception {
-        HttpURLConnection c=null; try {
-            String address=SEARCH_URL+URLEncoder.encode(query,"UTF-8")+"&page="+page+"&limit="+PAGE_SIZE;
-            c=(HttpURLConnection)new URL(address).openConnection(); c.setConnectTimeout(10000); c.setReadTimeout(15000); c.setRequestProperty("User-Agent","LiteDroid/1.6"); c.setRequestProperty("Accept","application/json");
-            int response=c.getResponseCode(); if(response!=HttpURLConnection.HTTP_OK) throw new Exception("F-Droid search returned HTTP "+response);
-            byte[] bytes=readLimited(c.getInputStream(),3*1024*1024); Object json=new org.json.JSONTokener(new String(bytes,"UTF-8")).nextValue(); JSONArray results=findResults(json); if(results==null) throw new Exception("Unexpected F-Droid search response.");
-            List<AppEntry> found=new ArrayList<>(); for(int i=0;i<results.length();i++){JSONObject item=results.optJSONObject(i);if(item==null)continue;AppEntry app=parseSearchResult(item);if(!app.id.isEmpty()||!app.name.isEmpty())found.add(app);}
-            return new SearchPage(found,results.length()>=PAGE_SIZE);
-        } finally {if(c!=null)c.disconnect();}
+        HttpURLConnection c=null;
+        try {
+            // The JSON endpoint is documented for basic searches but does not provide
+            // reliable page/limit pagination. Use the website's page parameter instead.
+            String address="https://search.f-droid.org/?q="+URLEncoder.encode(query,"UTF-8")+"&page="+page+"&lang=";
+            c=(HttpURLConnection)new URL(address).openConnection();
+            c.setConnectTimeout(10000);
+            c.setReadTimeout(15000);
+            c.setInstanceFollowRedirects(true);
+            c.setRequestProperty("User-Agent","Mozilla/5.0 (compatible; LiteDroid/1.6)");
+            c.setRequestProperty("Accept","text/html");
+            int response=c.getResponseCode();
+            if(response!=HttpURLConnection.HTTP_OK) throw new Exception("F-Droid search returned HTTP "+response);
+            byte[] bytes=readLimited(c.getInputStream(),4*1024*1024);
+            String html=new String(bytes,"UTF-8");
+            List<AppEntry> found=parseHtmlSearchResults(html);
+            return new SearchPage(found,found.size()>=PAGE_SIZE);
+        } finally {
+            if(c!=null)c.disconnect();
+        }
+    }
+
+    private static List<AppEntry> parseHtmlSearchResults(String html) {
+        List<AppEntry> found=new ArrayList<>();
+        Pattern cards=Pattern.compile("(?is)<a\\b(?=[^>]*class=[\\\"'][^\\\"']*\\\\bpackage-header\\\\b[^\\\"']*[\\\"'])[^>]*>(.*?)</a>");
+        Matcher cardMatcher=cards.matcher(html);
+        while(cardMatcher.find()) {
+            String card=cardMatcher.group(1);
+            String href=htmlAttribute(cardMatcher.group(0),"href");
+            String id=normalizePackageId(href);
+            if(id.isEmpty()) continue;
+
+            AppEntry app=new AppEntry();
+            app.id=id;
+            app.name=htmlElementText(card,"h4","package-name");
+            if(app.name.isEmpty()) app.name=id;
+            app.summary=htmlElementText(card,"span","package-summary");
+            app.description=app.summary;
+            app.icon=htmlElementAttribute(card,"img","package-icon","src");
+            if(!app.icon.isEmpty() && app.icon.startsWith("//")) app.icon="https:"+app.icon;
+            found.add(app);
+        }
+        return found;
+    }
+
+    private static String htmlElementText(String html,String tag,String className) {
+        Pattern p=Pattern.compile("(?is)<"+tag+"\\\\b(?=[^>]*class=[\\\"'][^\\\"']*\\\\b"+Pattern.quote(className)+"\\\\b[^\\\"']*[\\\"'])[^>]*>(.*?)</"+tag+"\\\\s*>");
+        Matcher m=p.matcher(html);
+        if(!m.find()) return "";
+        return Html.fromHtml(m.group(1),Html.FROM_HTML_MODE_LEGACY).toString().trim();
+    }
+
+    private static String htmlElementAttribute(String html,String tag,String className,String attribute) {
+        Pattern p=Pattern.compile("(?is)<"+tag+"\\\\b(?=[^>]*class=[\\\"'][^\\\"']*\\\\b"+Pattern.quote(className)+"\\\\b[^\\\"']*[\\\"'])[^>]*>");
+        Matcher m=p.matcher(html);
+        return m.find()?htmlAttribute(m.group(),attribute):"";
+    }
+
+    private static String htmlAttribute(String tag,String attribute) {
+        Pattern p=Pattern.compile("(?is)\\\\b"+Pattern.quote(attribute)+"\\\\s*=\\\\s*[\\\"']([^\\\"']*)[\\\"']");
+        Matcher m=p.matcher(tag);
+        return m.find()?m.group(1).trim():"";
     }
     private static byte[] readLimited(InputStream in, int max) throws Exception {
         try (InputStream input = in; ByteArrayOutputStream out = new ByteArrayOutputStream()) {
