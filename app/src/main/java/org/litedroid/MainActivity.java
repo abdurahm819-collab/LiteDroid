@@ -26,14 +26,17 @@ import java.net.URL;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
-    private static final String INDEX_URL = "https://f-droid.org/repo/index-v1.json";
-    private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    // Official F-Droid v2 repository index. This is the live catalogue source.
+    private static final String INDEX_URL = "https://f-droid.org/repo/index-v2.json";
+    private static final String REPO_URL = "https://f-droid.org/repo/";
+    private final ExecutorService worker = Executors.newFixedThreadPool(3);
     private final List<AppEntry> apps = new ArrayList<>();
     private LinearLayout list;
     private EditText search;
@@ -82,6 +85,7 @@ public class MainActivity extends Activity {
         status.setText("Connecting to F-Droid…");
         status.setTextColor(Color.DKGRAY);
         status.setTextSize(13);
+        status.setOnClickListener(v -> loadCatalogue());
         LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(-1, -2);
         statusParams.topMargin = dp(12);
         root.addView(status, statusParams);
@@ -110,89 +114,103 @@ public class MainActivity extends Activity {
 
     private void loadCatalogue() {
         progress.setVisibility(View.VISIBLE);
-        status.setText("Loading the F-Droid catalogue…");
+        status.setText("Loading the official F-Droid catalogue…");
         worker.execute(() -> {
+            HttpURLConnection connection = null;
             try {
-                HttpURLConnection c = (HttpURLConnection) new URL(INDEX_URL).openConnection();
-                c.setConnectTimeout(15000);
-                c.setReadTimeout(30000);
-                c.setRequestProperty("User-Agent", "LiteDroid/1.0");
-                InputStream in = c.getInputStream();
+                connection = (HttpURLConnection) new URL(INDEX_URL).openConnection();
+                connection.setConnectTimeout(15000);
+                connection.setReadTimeout(45000);
+                connection.setRequestProperty("User-Agent", "LiteDroid/1.1");
+                connection.setRequestProperty("Accept", "application/json");
+                int response = connection.getResponseCode();
+                if (response != HttpURLConnection.HTTP_OK) {
+                    throw new Exception("F-Droid server returned HTTP " + response);
+                }
+
+                InputStream in = connection.getInputStream();
                 ByteArrayOutputStream out = new ByteArrayOutputStream();
                 byte[] buffer = new byte[16384];
                 int n;
                 while ((n = in.read(buffer)) != -1) out.write(buffer, 0, n);
                 in.close();
-                c.disconnect();
 
                 JSONObject root = new JSONObject(out.toString("UTF-8"));
+                JSONObject appObject = root.optJSONObject("apps");
+                if (appObject == null) throw new Exception("The F-Droid index format was not recognised.");
+
                 List<AppEntry> loaded = new ArrayList<>();
-                JSONArray appArray = root.optJSONArray("apps");
-                if (appArray != null) {
-                    for (int i = 0; i < appArray.length(); i++) {
-                        JSONObject a = appArray.optJSONObject(i);
-                        if (a != null) loaded.add(parseApp(a));
-                    }
-                } else {
-                    JSONObject appObject = root.optJSONObject("apps");
-                    if (appObject != null) {
-                        JSONArray ids = appObject.names();
-                        if (ids != null) for (int i = 0; i < ids.length(); i++) {
-                            String id = ids.optString(i);
-                            JSONObject a = appObject.optJSONObject(id);
-                            if (a != null) loaded.add(parseApp(a, id));
-                        }
-                    }
+                Iterator<String> ids = appObject.keys();
+                while (ids.hasNext()) {
+                    String id = ids.next();
+                    JSONObject record = appObject.optJSONObject(id);
+                    if (record == null) continue;
+                    JSONObject metadata = record.optJSONObject("metadata");
+                    if (metadata == null) metadata = record;
+                    AppEntry entry = parseApp(metadata, id);
+                    if (!entry.name.isEmpty()) loaded.add(entry);
                 }
-                if (loaded.isEmpty()) throw new Exception("No app metadata found in the F-Droid index.");
+
+                if (loaded.isEmpty()) throw new Exception("F-Droid returned an empty app catalogue.");
                 Collections.sort(loaded, Comparator.comparing(x -> x.name.toLowerCase(Locale.ROOT)));
                 runOnUiThread(() -> {
                     apps.clear();
                     apps.addAll(loaded);
                     progress.setVisibility(View.GONE);
-                    status.setText(apps.size() + " apps · F-Droid");
-                    render("");
+                    status.setText(apps.size() + " apps · Official F-Droid index · Tap to refresh");
+                    render(search.getText().toString());
                 });
             } catch (Exception ex) {
+                String message = ex.getMessage() == null ? "Network error" : ex.getMessage();
                 runOnUiThread(() -> {
                     progress.setVisibility(View.GONE);
-                    status.setText("Could not load catalogue. Check your connection and tap to retry.");
-                    status.setOnClickListener(v -> loadCatalogue());
-                    Toast.makeText(this, ex.getMessage() == null ? "Network error" : ex.getMessage(), Toast.LENGTH_LONG).show();
+                    status.setText("Could not load catalogue. Tap here to retry.");
+                    Toast.makeText(this, message, Toast.LENGTH_LONG).show();
                 });
+            } finally {
+                if (connection != null) connection.disconnect();
             }
         });
     }
 
-    private static AppEntry parseApp(JSONObject a) {
-        return parseApp(a, first(a, "packageName", ""));
-    }
-
-    private static AppEntry parseApp(JSONObject a, String fallbackId) {
+    private static AppEntry parseApp(JSONObject metadata, String id) {
         AppEntry e = new AppEntry();
-        e.id = first(a, "packageName", fallbackId);
-        e.name = first(a, "name", e.id);
-        e.summary = first(a, "summary", "");
-        e.description = first(a, "description", e.summary);
-        e.icon = first(a, "icon", "");
-        e.web = first(a, "web", "");
-        e.source = first(a, "source", "");
-        e.tracker = first(a, "tracker", "");
-        e.donate = first(a, "donate", "");
-        e.license = first(a, "license", "");
+        e.id = id;
+        e.name = localized(metadata, "name", id);
+        e.summary = localized(metadata, "summary", "");
+        e.description = localized(metadata, "description", e.summary);
+        e.icon = localized(metadata, "icon", "");
+        e.web = firstLocalized(metadata, "webSite", "website", "web");
+        e.source = firstLocalized(metadata, "sourceCode", "source");
+        e.tracker = firstLocalized(metadata, "issueTracker", "tracker");
+        e.donate = firstLocalized(metadata, "donate", "donation");
+        e.license = localized(metadata, "license", "");
         return e;
     }
 
-    private static String first(JSONObject o, String key, String fallback) {
-        Object value = o.opt(key);
+    private static String firstLocalized(JSONObject object, String... keys) {
+        for (String key : keys) {
+            String value = localized(object, key, "");
+            if (!value.isEmpty()) return value;
+        }
+        return "";
+    }
+
+    private static String localized(JSONObject object, String key, String fallback) {
+        Object value = object.opt(key);
         if (value instanceof JSONObject) {
-            JSONObject localized = (JSONObject) value;
-            String best = localized.optString("en-US", "");
-            if (best.isEmpty()) best = localized.optString("en", "");
-            if (best.isEmpty() && localized.keys().hasNext()) best = localized.optString(localized.keys().next(), "");
+            JSONObject translations = (JSONObject) value;
+            String best = translations.optString("en-US", "");
+            if (best.isEmpty()) best = translations.optString("en", "");
+            if (best.isEmpty()) {
+                Iterator<String> keys = translations.keys();
+                if (keys.hasNext()) best = translations.optString(keys.next(), "");
+            }
             return best.isEmpty() ? fallback : best;
         }
-        return value == null || value == JSONObject.NULL || value.toString().isEmpty() ? fallback : value.toString();
+        if (value == null || value == JSONObject.NULL) return fallback;
+        String result = value.toString().trim();
+        return result.isEmpty() ? fallback : result;
     }
 
     private void render(String query) {
@@ -256,9 +274,16 @@ public class MainActivity extends Activity {
     private void loadIcon(ImageView target, String path) {
         worker.execute(() -> {
             try {
-                String clean = path.startsWith("/") ? path.substring(1) : path;
-                URL url = new URL("https://f-droid.org/repo/" + clean);
-                HttpURLConnection c = (HttpURLConnection) url.openConnection();
+                String clean = path.trim();
+                if (clean.startsWith("http://") || clean.startsWith("https://")) {
+                    // Only use HTTPS for remote catalogue images.
+                    if (!clean.startsWith("https://")) return;
+                } else {
+                    while (clean.startsWith("/")) clean = clean.substring(1);
+                    if (!clean.startsWith("icons/") && !clean.startsWith("icons-")) clean = "icons-640/" + clean;
+                    clean = REPO_URL + clean;
+                }
+                HttpURLConnection c = (HttpURLConnection) new URL(clean).openConnection();
                 c.setConnectTimeout(7000);
                 c.setReadTimeout(7000);
                 InputStream in = c.getInputStream();
