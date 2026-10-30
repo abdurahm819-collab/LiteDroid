@@ -89,6 +89,11 @@ public class MainActivity extends Activity {
     private String activeExpectedSha256 = "";
     private Uri pendingInstallUri;
     private boolean detailsVisible = false;
+    private int currentPage = 1;
+    private boolean loadingMore = false;
+    private boolean hasMorePages = false;
+    private int activeSearchRequest = 0;
+    private static final int PAGE_SIZE = 10;
 
     static class AppEntry {
         String id="", name="", summary="", description="", icon="";
@@ -206,6 +211,12 @@ public class MainActivity extends Activity {
         appList.setClipToPadding(false);
         adapter = new AppAdapter();
         appList.setAdapter(adapter);
+        appList.setOnScrollListener(new android.widget.AbsListView.OnScrollListener() {
+            @Override public void onScrollStateChanged(android.widget.AbsListView view, int scrollState) {}
+            @Override public void onScroll(android.widget.AbsListView view, int firstVisible, int visibleCount, int totalCount) {
+                if (totalCount > 0 && firstVisible + visibleCount >= totalCount - 3) loadNextPage();
+            }
+        });
         root.addView(appList, new LinearLayout.LayoutParams(-1, 0, 1));
         setContentView(root);
 
@@ -217,82 +228,39 @@ public class MainActivity extends Activity {
     }
 
     private void searchApps(String rawQuery) {
-        String query = rawQuery.trim();
-        currentQuery = query;
-        int requestId = latestRequest.incrementAndGet();
-        apps.clear();
+        String query = rawQuery.trim(); currentQuery = query;
+        int requestId = latestRequest.incrementAndGet(); activeSearchRequest = requestId;
+        currentPage = 1; loadingMore = false; hasMorePages = false;
+        apps.clear(); imageCache.evictAll();
         if (adapter != null) adapter.notifyDataSetChanged();
-        if (query.length() < 2) {
-            progress.setVisibility(View.GONE);
-            status.setText("Type at least 2 characters to search.");
-            return;
-        }
-        progress.setVisibility(View.VISIBLE);
-        status.setText("Searching for “" + query + "”…");
-        worker.execute(() -> {
-            try {
-                List<AppEntry> found = fetchSearchPages(query);
-                runOnUiThread(() -> {
-                    if (requestId != latestRequest.get()) return;
-                    apps.clear();
-                    apps.addAll(found);
-                    progress.setVisibility(View.GONE);
-                    status.setText(found.size() + " results · F-Droid search (offset test)");
-                    adapter.notifyDataSetChanged();
-                });
-            } catch (Exception e) {
-                String message = e.getMessage() == null ? "Network error" : e.getMessage();
-                runOnUiThread(() -> {
-                    if (requestId != latestRequest.get()) return;
-                    progress.setVisibility(View.GONE);
-                    status.setText("Search failed. Check your connection and try again.");
-                    Toast.makeText(this, message, Toast.LENGTH_LONG).show();
-                });
-            }
-        });
+        if (query.length() < 2) { progress.setVisibility(View.GONE); status.setText("Type at least 2 characters to search."); return; }
+        progress.setVisibility(View.VISIBLE); status.setText("Searching for “" + query + "”…");
+        worker.execute(() -> { try {
+            SearchPage page = fetchSearchPage(query, 1);
+            runOnUiThread(() -> { if (requestId != latestRequest.get()) return; apps.clear(); apps.addAll(page.apps); currentPage=1; hasMorePages=page.hasMore; progress.setVisibility(View.GONE); status.setText(apps.size()+" results · Scroll down to load more"); adapter.notifyDataSetChanged(); });
+        } catch (Exception e) { String message=e.getMessage()==null?"Network error":e.getMessage(); runOnUiThread(() -> { if(requestId!=latestRequest.get()) return; progress.setVisibility(View.GONE); status.setText("Search failed. Check your connection and try again."); Toast.makeText(this,message,Toast.LENGTH_LONG).show(); }); } });
     }
 
-    private List<AppEntry> fetchSearchPages(String query) throws Exception {
-        List<AppEntry> combined = new ArrayList<>();
-        java.util.HashSet<String> seen = new java.util.HashSet<>();
-        // The public F-Droid docs only show q=. Probe common offsets experimentally.
-        int[] offsets = {0, 10, 20, 30, 40};
-        for (int offset : offsets) {
-            HttpURLConnection c = null;
-            try {
-                String address = SEARCH_URL + URLEncoder.encode(query, "UTF-8") + "&offset=" + offset;
-                c = (HttpURLConnection) new URL(address).openConnection();
-                c.setConnectTimeout(10000);
-                c.setReadTimeout(15000);
-                c.setRequestProperty("User-Agent", "LiteDroid/1.4");
-                c.setRequestProperty("Accept", "application/json");
-                int response = c.getResponseCode();
-                if (response != HttpURLConnection.HTTP_OK) {
-                    if (offset == 0) throw new Exception("F-Droid search returned HTTP " + response);
-                    break;
-                }
-                byte[] bytes = readLimited(c.getInputStream(), 3 * 1024 * 1024);
-                Object json = new org.json.JSONTokener(new String(bytes, "UTF-8")).nextValue();
-                JSONArray results = findResults(json);
-                if (results == null) throw new Exception("Unexpected F-Droid search response.");
-                int added = 0;
-                for (int i = 0; i < results.length(); i++) {
-                    JSONObject item = results.optJSONObject(i);
-                    if (item == null) continue;
-                    AppEntry app = parseSearchResult(item);
-                    if (app.id.isEmpty() && app.name.isEmpty()) continue;
-                    String key = app.id.isEmpty() ? app.name.toLowerCase(Locale.ROOT) : app.id;
-                    if (seen.add(key)) { combined.add(app); added++; }
-                }
-                // If offset is ignored, the first duplicate-only page ends probing.
-                if (results.length() == 0 || added == 0 || results.length() < 10) break;
-            } finally {
-                if (c != null) c.disconnect();
-            }
-        }
-        return combined;
+    private void loadNextPage() {
+        if (loadingMore || !hasMorePages || currentQuery.length()<2 || detailsVisible) return;
+        loadingMore=true; final int requestId=activeSearchRequest; final int nextPage=currentPage+1; status.setText("Loading more apps…");
+        worker.execute(() -> { try {
+            SearchPage page=fetchSearchPage(currentQuery,nextPage);
+            runOnUiThread(() -> { if(requestId!=latestRequest.get()) return; int before=apps.size(); java.util.HashSet<String> seen=new java.util.HashSet<>(); for(AppEntry old:apps) seen.add(old.id.isEmpty()?old.name.toLowerCase(Locale.ROOT):old.id); for(AppEntry app:page.apps){String key=app.id.isEmpty()?app.name.toLowerCase(Locale.ROOT):app.id; if(seen.add(key)) apps.add(app);} currentPage=nextPage; hasMorePages=page.hasMore && apps.size()>before; loadingMore=false; status.setText(apps.size()+" results"+(hasMorePages?" · Scroll for more":" · End of results")); adapter.notifyDataSetChanged(); });
+        } catch(Exception e){runOnUiThread(()->{if(requestId==latestRequest.get()){loadingMore=false;status.setText("Could not load more apps. Scroll down to retry.");}});} });
     }
 
+    private static class SearchPage { final List<AppEntry> apps; final boolean hasMore; SearchPage(List<AppEntry> apps,boolean hasMore){this.apps=apps;this.hasMore=hasMore;} }
+    private SearchPage fetchSearchPage(String query,int page) throws Exception {
+        HttpURLConnection c=null; try {
+            String address=SEARCH_URL+URLEncoder.encode(query,"UTF-8")+"&page="+page+"&limit="+PAGE_SIZE;
+            c=(HttpURLConnection)new URL(address).openConnection(); c.setConnectTimeout(10000); c.setReadTimeout(15000); c.setRequestProperty("User-Agent","LiteDroid/1.6"); c.setRequestProperty("Accept","application/json");
+            int response=c.getResponseCode(); if(response!=HttpURLConnection.HTTP_OK) throw new Exception("F-Droid search returned HTTP "+response);
+            byte[] bytes=readLimited(c.getInputStream(),3*1024*1024); Object json=new org.json.JSONTokener(new String(bytes,"UTF-8")).nextValue(); JSONArray results=findResults(json); if(results==null) throw new Exception("Unexpected F-Droid search response.");
+            List<AppEntry> found=new ArrayList<>(); for(int i=0;i<results.length();i++){JSONObject item=results.optJSONObject(i);if(item==null)continue;AppEntry app=parseSearchResult(item);if(!app.id.isEmpty()||!app.name.isEmpty())found.add(app);}
+            return new SearchPage(found,results.length()>=PAGE_SIZE);
+        } finally {if(c!=null)c.disconnect();}
+    }
     private static byte[] readLimited(InputStream in, int max) throws Exception {
         try (InputStream input = in; ByteArrayOutputStream out = new ByteArrayOutputStream()) {
             byte[] buffer = new byte[8192];
