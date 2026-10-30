@@ -276,7 +276,7 @@ public class MainActivity extends Activity {
 
     private static List<AppEntry> parseHtmlSearchResults(String html) {
         List<AppEntry> found=new ArrayList<>();
-        Pattern cards=Pattern.compile("(?is)<a\\b(?=[^>]*class=[\\\"'][^\\\"']*\\\\bpackage-header\\\\b[^\\\"']*[\\\"'])[^>]*>(.*?)</a>");
+        Pattern cards=Pattern.compile("(?is)<a\\b(?=[^>]*class=[\\\"'][^\\\"']*\\bpackage-header\\b[^\\\"']*[\\\"'])[^>]*>(.*?)</a>");
         Matcher cardMatcher=cards.matcher(html);
         while(cardMatcher.find()) {
             String card=cardMatcher.group(1);
@@ -298,20 +298,20 @@ public class MainActivity extends Activity {
     }
 
     private static String htmlElementText(String html,String tag,String className) {
-        Pattern p=Pattern.compile("(?is)<"+tag+"\\\\b(?=[^>]*class=[\\\"'][^\\\"']*\\\\b"+Pattern.quote(className)+"\\\\b[^\\\"']*[\\\"'])[^>]*>(.*?)</"+tag+"\\\\s*>");
+        Pattern p=Pattern.compile("(?is)<"+tag+"\\b(?=[^>]*class=[\\\"'][^\\\"']*\\b"+Pattern.quote(className)+"\\b[^\\\"']*[\\\"'])[^>]*>(.*?)</"+tag+"\\s*>");
         Matcher m=p.matcher(html);
         if(!m.find()) return "";
         return Html.fromHtml(m.group(1),Html.FROM_HTML_MODE_LEGACY).toString().trim();
     }
 
     private static String htmlElementAttribute(String html,String tag,String className,String attribute) {
-        Pattern p=Pattern.compile("(?is)<"+tag+"\\\\b(?=[^>]*class=[\\\"'][^\\\"']*\\\\b"+Pattern.quote(className)+"\\\\b[^\\\"']*[\\\"'])[^>]*>");
+        Pattern p=Pattern.compile("(?is)<"+tag+"\\b(?=[^>]*class=[\\\"'][^\\\"']*\\b"+Pattern.quote(className)+"\\b[^\\\"']*[\\\"'])[^>]*>");
         Matcher m=p.matcher(html);
         return m.find()?htmlAttribute(m.group(),attribute):"";
     }
 
     private static String htmlAttribute(String tag,String attribute) {
-        Pattern p=Pattern.compile("(?is)\\\\b"+Pattern.quote(attribute)+"\\\\s*=\\\\s*[\\\"']([^\\\"']*)[\\\"']");
+        Pattern p=Pattern.compile("(?is)\\b"+Pattern.quote(attribute)+"\\s*=\\s*[\\\"']([^\\\"']*)[\\\"']");
         Matcher m=p.matcher(tag);
         return m.find()?m.group(1).trim():"";
     }
