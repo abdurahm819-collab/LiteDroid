@@ -52,10 +52,24 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import android.util.LruCache;
+import android.util.JsonReader;
+import android.util.JsonToken;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStreamReader;
+import java.security.MessageDigest;
+import kotlin.Pair;
+import kotlin.jvm.functions.Function1;
+import org.fdroid.index.v1.IndexV1Verifier;
 
 public class MainActivity extends Activity {
     private static final String SEARCH_URL = "https://search.f-droid.org/api/search_apps?q=";
     private static final String REPO_URL = "https://f-droid.org/repo/";
+    private static final String INDEX_URL = REPO_URL + "index-v1.jar";
+    private static final String INDEX_SIGNER_SHA256 = "43238d512c1e5eb2d6569f4a3afbf5523418b82e0a3ed1552770abb9a9c9ccab";
+    private static final long INDEX_CACHE_MAX_AGE_MS = 6L * 60L * 60L * 1000L;
+    private static final int MAX_INDEX_BYTES = 100 * 1024 * 1024;
     private static final String PACKAGE_PAGE = "https://f-droid.org/packages/";
     private final ExecutorService worker = Executors.newFixedThreadPool(3);
     private final AtomicInteger latestRequest = new AtomicInteger(0);
@@ -72,14 +86,15 @@ public class MainActivity extends Activity {
     private AppAdapter adapter;
     private String currentQuery = "";
     private long activeDownloadId = -1;
+    private String activeExpectedSha256 = "";
     private Uri pendingInstallUri;
     private boolean detailsVisible = false;
 
     static class AppEntry {
         String id="", name="", summary="", description="", icon="";
         String web="", source="", tracker="", donate="", license="";
-        String apkUrl="", versionName="";
-        long versionCode=0;
+        String apkUrl="", versionName="", apkSha256="";
+        long versionCode=0, apkSize=0;
         final List<String> screenshots = new ArrayList<>();
     }
 
@@ -94,9 +109,29 @@ public class MainActivity extends Activity {
                 if (cursor != null && cursor.moveToFirst()) {
                     int column = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS);
                     if (column >= 0 && cursor.getInt(column) == DownloadManager.STATUS_SUCCESSFUL) {
-                        pendingInstallUri = dm.getUriForDownloadedFile(id);
-                        if (pendingInstallUri != null) startInstallerWhenAllowed();
-                        else Toast.makeText(MainActivity.this, "Download finished, but Android could not open the APK.", Toast.LENGTH_LONG).show();
+                        Uri downloadedUri = dm.getUriForDownloadedFile(id);
+                        String expectedHash = activeExpectedSha256;
+                        if (downloadedUri == null || expectedHash.isEmpty()) {
+                            Toast.makeText(MainActivity.this, "Download finished, but APK verification data is missing.", Toast.LENGTH_LONG).show();
+                        } else {
+                            worker.execute(() -> {
+                                try {
+                                    String actualHash = sha256(downloadedUri);
+                                    if (!expectedHash.equalsIgnoreCase(actualHash)) {
+                                        dm.remove(id);
+                                        runOnUiThread(() -> Toast.makeText(MainActivity.this, "APK checksum did not match F-Droid's signed index. The file was rejected.", Toast.LENGTH_LONG).show());
+                                        return;
+                                    }
+                                    runOnUiThread(() -> {
+                                        pendingInstallUri = downloadedUri;
+                                        startInstallerWhenAllowed();
+                                    });
+                                } catch (Exception verifyError) {
+                                    dm.remove(id);
+                                    runOnUiThread(() -> Toast.makeText(MainActivity.this, "Could not verify the downloaded APK. It was rejected.", Toast.LENGTH_LONG).show());
+                                }
+                            });
+                        }
                     } else {
                         int reasonCol = cursor.getColumnIndex(DownloadManager.COLUMN_REASON);
                         int reason = reasonCol >= 0 ? cursor.getInt(reasonCol) : 0;
@@ -496,7 +531,7 @@ public class MainActivity extends Activity {
         shotsScroll.addView(shots);
         body.addView(shotsScroll);
 
-        TextView apkStatus = sectionText("Checking the official F-Droid app page for screenshots and the current APK…");
+        TextView apkStatus = sectionText("Checking the signed F-Droid repository index and loading screenshots…");
         body.addView(apkStatus);
         Button download = new Button(this);
         download.setText("Download APK");
@@ -522,7 +557,7 @@ public class MainActivity extends Activity {
                 fetchOfficialPackageInfo(app);
                 runOnUiThread(() -> {
                     if (!detailsVisible) return;
-                    apkStatus.setText("Latest official version: " + app.versionName + " (code " + app.versionCode + ").");
+                    apkStatus.setText("Verified official version: " + app.versionName + " (code " + app.versionCode + "). APK checksum is ready.");
                     download.setEnabled(!app.apkUrl.isEmpty());
                 });
             } catch (Exception e) {
@@ -575,34 +610,121 @@ public class MainActivity extends Activity {
     }
 
     private void fetchOfficialPackageInfo(AppEntry app) throws Exception {
-        if (!app.id.matches("[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)+")) {
-            throw new Exception("Invalid package ID from search: [" + app.id + "].");
-        }
-        String jsonText = fetchText("https://f-droid.org/api/v1/packages/" + Uri.encode(app.id));
-        JSONObject root = new JSONObject(jsonText);
-        long suggested = root.optLong("suggestedVersionCode", -1);
-        JSONArray versions = root.optJSONArray("packages");
-        if (versions == null || versions.length() == 0) {
-            throw new Exception("F-Droid lists no downloadable versions for this app.");
-        }
-        JSONObject selected = null;
-        for (int i = 0; i < versions.length(); i++) {
-            JSONObject candidate = versions.optJSONObject(i);
-            if (candidate != null && candidate.optLong("versionCode", -2) == suggested) {
-                selected = candidate;
-                break;
+        File indexFile = getCachedIndexJar();
+        IndexV1Verifier verifier = new IndexV1Verifier(indexFile, null, INDEX_SIGNER_SHA256);
+        Pair<String, ApkInfo> verified = verifier.getStreamAndVerify(new Function1<InputStream, ApkInfo>() {
+            @Override public ApkInfo invoke(InputStream input) {
+                try { return findPackageInIndex(input, app.id); }
+                catch (Exception e) { throw new IllegalStateException("Could not read the signed F-Droid index.", e); }
             }
+        });
+        ApkInfo info = verified.getSecond();
+        if (info == null) throw new Exception("This app has no APK in the current official F-Droid repository.");
+        if (info.apkName.isEmpty() || !info.apkName.matches("[A-Za-z0-9._+-]+\\.apk") || info.apkName.contains(".."))
+            throw new Exception("F-Droid index contains an invalid APK filename.");
+        if (!"sha256".equalsIgnoreCase(info.hashType) || !info.sha256.matches("(?i)[0-9a-f]{64}"))
+            throw new Exception("F-Droid index does not contain a valid SHA-256 checksum.");
+        app.versionName = info.versionName.isEmpty() ? "Latest" : info.versionName;
+        app.versionCode = info.versionCode;
+        app.apkSize = info.size;
+        app.apkSha256 = info.sha256.toLowerCase(Locale.ROOT);
+        app.apkUrl = REPO_URL + Uri.encode(info.apkName);
+    }
+
+    private File getCachedIndexJar() throws Exception {
+        File cached = new File(getCacheDir(), "fdroid-index-v1.jar");
+        long age = System.currentTimeMillis() - cached.lastModified();
+        if (cached.isFile() && cached.length() > 0 && age >= 0 && age < INDEX_CACHE_MAX_AGE_MS) return cached;
+        File temporary = new File(getCacheDir(), "fdroid-index-v1.download");
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(INDEX_URL).openConnection();
+            connection.setConnectTimeout(15000);
+            connection.setReadTimeout(45000);
+            connection.setRequestProperty("User-Agent", "LiteDroid/1.5");
+            connection.setRequestProperty("Accept", "application/java-archive, application/octet-stream");
+            int response = connection.getResponseCode();
+            if (response != HttpURLConnection.HTTP_OK) throw new Exception("F-Droid index returned HTTP " + response + ".");
+            int length = connection.getContentLength();
+            if (length > MAX_INDEX_BYTES) throw new Exception("F-Droid index is larger than LiteDroid safety limit.");
+            long total = 0;
+            try (InputStream in = connection.getInputStream(); FileOutputStream out = new FileOutputStream(temporary)) {
+                byte[] buffer = new byte[16384];
+                int count;
+                while ((count = in.read(buffer)) != -1) {
+                    total += count;
+                    if (total > MAX_INDEX_BYTES) throw new Exception("F-Droid index exceeded LiteDroid safety limit.");
+                    out.write(buffer, 0, count);
+                }
+                out.getFD().sync();
+            }
+            if (total == 0) throw new Exception("F-Droid returned an empty repository index.");
+            if (cached.exists() && !cached.delete()) throw new Exception("Could not replace the cached index.");
+            if (!temporary.renameTo(cached)) throw new Exception("Could not save the F-Droid index.");
+            return cached;
+        } catch (Exception e) { temporary.delete(); throw e; }
+        finally { if (connection != null) connection.disconnect(); }
+    }
+
+    private static class ApkInfo {
+        String apkName = "", versionName = "", sha256 = "", hashType = "";
+        long versionCode = 0, size = 0;
+    }
+
+    private static ApkInfo findPackageInIndex(InputStream input, String packageId) throws Exception {
+        JsonReader reader = new JsonReader(new InputStreamReader(input, "UTF-8"));
+        ApkInfo selected = null;
+        reader.beginObject();
+        while (reader.hasNext()) {
+            String topKey = reader.nextName();
+            if (!"packages".equals(topKey)) { reader.skipValue(); continue; }
+            reader.beginObject();
+            while (reader.hasNext()) {
+                String id = reader.nextName();
+                if (packageId.equals(id)) selected = readPackageVersions(reader);
+                else reader.skipValue();
+            }
+            reader.endObject();
         }
-        if (selected == null) selected = versions.optJSONObject(0);
-        if (selected == null) throw new Exception("F-Droid version information is incomplete.");
-        app.versionName = selected.optString("versionName", "Latest");
-        app.versionCode = selected.optLong("versionCode", 0);
-        if (app.versionCode <= 0) throw new Exception("F-Droid did not provide a valid version code.");
-        String apkName = selected.optString("apkName", app.id + "_" + app.versionCode + ".apk");
-        if (apkName.contains("/") || apkName.contains("..") || !apkName.endsWith(".apk")) {
-            throw new Exception("F-Droid returned an invalid APK filename.");
+        reader.endObject();
+        return selected;
+    }
+
+    private static ApkInfo readPackageVersions(JsonReader reader) throws Exception {
+        ApkInfo best = null;
+        reader.beginArray();
+        while (reader.hasNext()) {
+            ApkInfo candidate = new ApkInfo();
+            reader.beginObject();
+            while (reader.hasNext()) {
+                String key = reader.nextName();
+                if ("apkName".equals(key)) candidate.apkName = readJsonString(reader);
+                else if ("versionName".equals(key)) candidate.versionName = readJsonString(reader);
+                else if ("hash".equals(key)) candidate.sha256 = readJsonString(reader);
+                else if ("hashType".equals(key)) candidate.hashType = readJsonString(reader);
+                else if ("versionCode".equals(key)) candidate.versionCode = readJsonLong(reader);
+                else if ("size".equals(key)) candidate.size = readJsonLong(reader);
+                else reader.skipValue();
+            }
+            reader.endObject();
+            boolean usable = candidate.versionCode > 0 && candidate.apkName.matches("[A-Za-z0-9._+-]+\\.apk") &&
+                    "sha256".equalsIgnoreCase(candidate.hashType) && candidate.sha256.matches("(?i)[0-9a-f]{64}");
+            if (usable && (best == null || candidate.versionCode > best.versionCode)) best = candidate;
         }
-        app.apkUrl = "https://f-droid.org/repo/" + apkName;
+        reader.endArray();
+        return best;
+    }
+
+    private static String readJsonString(JsonReader reader) throws Exception {
+        JsonToken token = reader.peek();
+        if (token == JsonToken.NULL) { reader.nextNull(); return ""; }
+        if (token == JsonToken.STRING || token == JsonToken.NUMBER) return reader.nextString();
+        reader.skipValue();
+        return "";
+    }
+
+    private static long readJsonLong(JsonReader reader) throws Exception {
+        try { return Long.parseLong(readJsonString(reader)); } catch (Exception ignored) { return 0; }
     }
 
     private static List<String> findScreenshots(String html, String packageId) {
@@ -647,7 +769,7 @@ public class MainActivity extends Activity {
     }
 
     private void downloadApk(AppEntry app) {
-        if (TextUtils.isEmpty(app.apkUrl) || !app.apkUrl.startsWith("https://f-droid.org/")) {
+        if (TextUtils.isEmpty(app.apkUrl) || !app.apkUrl.startsWith(REPO_URL) || !app.apkSha256.matches("(?i)[0-9a-f]{64}")) {
             Toast.makeText(this, "No trusted F-Droid APK URL is available.", Toast.LENGTH_LONG).show();
             return;
         }
@@ -660,6 +782,7 @@ public class MainActivity extends Activity {
             request.setMimeType("application/vnd.android.package-archive");
             request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
             request.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, filename);
+            activeExpectedSha256 = app.apkSha256;
             activeDownloadId = dm.enqueue(request);
             Toast.makeText(this, "APK download started.", Toast.LENGTH_SHORT).show();
         } catch (Exception e) {
@@ -667,6 +790,19 @@ public class MainActivity extends Activity {
         }
     }
 
+    private String sha256(Uri uri) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        try (InputStream input = getContentResolver().openInputStream(uri)) {
+            if (input == null) throw new Exception("Downloaded APK could not be opened.");
+            byte[] buffer = new byte[16384];
+            int count;
+            while ((count = input.read(buffer)) != -1) digest.update(buffer, 0, count);
+        }
+        byte[] hash = digest.digest();
+        StringBuilder hex = new StringBuilder(hash.length * 2);
+        for (byte b : hash) hex.append(String.format(Locale.ROOT, "%02x", b & 0xff));
+        return hex.toString();
+    }
     private void startInstallerWhenAllowed() {
         if (Build.VERSION.SDK_INT >= 26 && !getPackageManager().canRequestPackageInstalls()) {
             try {
