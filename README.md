@@ -21,3 +21,6 @@ The GitHub Actions workflow can build and publish LiteDroid 1.0 to Releases when
 
 ## Data
 Catalogue metadata and icons are read from the official F-Droid repository. LiteDroid does not host or repackage the apps listed in the catalogue.
+
+## Release status
+The `main` branch build publishes the debug APK as the GitHub Release named **LiteDroid 1.0**.
