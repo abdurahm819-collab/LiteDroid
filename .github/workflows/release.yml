@@ -5,8 +5,6 @@ on:
   push:
     branches:
       - main
-    tags:
-      - 'v1.1'
 
 permissions:
   contents: write
@@ -29,22 +27,23 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Build LiteDroid 1.1
+      - name: Build LiteDroid 1.2
         run: gradle --no-daemon assembleDebug
 
       - name: Prepare release APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk LiteDroid-1.1.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk LiteDroid-1.2.apk
 
-      - name: Publish LiteDroid 1.1
+      - name: Publish LiteDroid 1.2
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.1
-          name: LiteDroid 1.1
+          tag_name: v1.2
+          name: LiteDroid 1.2
           body: |
-            LiteDroid 1.1
+            LiteDroid 1.2
 
-            - Uses the official F-Droid v2 repository index for the live app catalogue.
-            - Reads app metadata and developer links from F-Droid.
-            - Targets Android API 35 to remove the old-target compatibility warning on current Android versions.
-          files: LiteDroid-1.1.apk
+            - Uses the official F-Droid full-text search API.
+            - Searches only when you enter a query; does not download the full repository index.
+            - Reduces memory use and avoids the previous startup loading hang.
+            - Targets Android API 35.
+          files: LiteDroid-1.2.apk
           make_latest: true
