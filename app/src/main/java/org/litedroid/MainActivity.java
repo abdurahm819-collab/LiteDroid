@@ -548,7 +548,7 @@ public class MainActivity extends Activity {
     }
 
     private void fetchOfficialPackageInfo(AppEntry app) throws Exception {
-        if (!app.id.matches("[A-Za-z0-9_]+(\\\\.[A-Za-z0-9_]+)+")) {
+        if (!app.id.matches("[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)+")) {
             throw new Exception("Invalid F-Droid package ID.");
         }
         String jsonText = fetchText("https://f-droid.org/api/v1/packages/" + Uri.encode(app.id));
@@ -586,7 +586,7 @@ public class MainActivity extends Activity {
         int end = html.indexOf("class=\\\"package-versions", start);
         if (end < 0) end = Math.min(html.length(), start + 20000);
         String gallery = html.substring(start, end);
-        Matcher tags = Pattern.compile("(?is)<img\\\\b[^>]*>").matcher(gallery);
+        Matcher tags = Pattern.compile("(?is)<img\\b[^>]*>").matcher(gallery);
         String expectedPrefix = "https://f-droid.org/repo/" + packageId + "/";
         while (tags.find() && result.size() < 8) {
             String src = attribute(tags.group(), "src");
