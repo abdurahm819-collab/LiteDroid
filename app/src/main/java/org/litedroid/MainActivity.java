@@ -580,10 +580,10 @@ public class MainActivity extends Activity {
 
     private static List<String> findScreenshots(String html, String packageId) {
         List<String> result = new ArrayList<>();
-        int start = html.indexOf("id=\\\"screenshots\\\"");
+        int start = html.indexOf("id=\"screenshots\"");
         if (start < 0) start = html.indexOf("id='screenshots'");
         if (start < 0) return result;
-        int end = html.indexOf("class=\\\"package-versions", start);
+        int end = html.indexOf("class=\"package-versions", start);
         if (end < 0) end = Math.min(html.length(), start + 20000);
         String gallery = html.substring(start, end);
         Matcher tags = Pattern.compile("(?is)<img\\b[^>]*>").matcher(gallery);
