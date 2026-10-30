@@ -324,6 +324,10 @@ public class MainActivity extends Activity {
     private static AppEntry parseSearchResult(JSONObject item) {
         AppEntry e = new AppEntry();
         e.id = normalizePackageId(first(item, "packageName", "package_name", "packageId", "package_id", "id", "package", "appid"));
+        // Search API responses can expose the package page URL instead of a package ID.
+        if (e.id.isEmpty()) {
+            e.id = normalizePackageId(first(item, "packageUrl", "package_url", "detailsUrl", "detail_url", "url", "link", "webUrl"));
+        }
         e.name = first(item, "name", "title", "label");
         if (e.name.isEmpty()) e.name = e.id;
         e.summary = first(item, "summary", "shortDescription", "short_description");
@@ -610,6 +614,10 @@ public class MainActivity extends Activity {
     }
 
     private void fetchOfficialPackageInfo(AppEntry app) throws Exception {
+        if (app.id == null || app.id.trim().isEmpty()) {
+            throw new Exception("F-Droid search did not provide this app's package ID. Try opening another result.");
+        }
+        app.id = normalizePackageId(app.id);
         File indexFile = getCachedIndexJar();
         IndexV1Verifier verifier = new IndexV1Verifier(indexFile, null, INDEX_SIGNER_SHA256);
         Pair<String, ApkInfo> verified = verifier.getStreamAndVerify(new Function1<InputStream, ApkInfo>() {
@@ -619,7 +627,10 @@ public class MainActivity extends Activity {
             }
         });
         ApkInfo info = verified.getSecond();
-        if (info == null) throw new Exception("This app has no APK in the current official F-Droid repository.");
+        if (info == null) {
+            String packageLabel = app.id.isEmpty() ? "(empty package ID)" : app.id;
+            throw new Exception("No APK entry matched package ID: " + packageLabel + ". The app may be missing from the main repository index.");
+        }
         if (info.apkName.isEmpty() || !info.apkName.matches("[A-Za-z0-9._+-]+\\.apk") || info.apkName.contains(".."))
             throw new Exception("F-Droid index contains an invalid APK filename.");
         if (!"sha256".equalsIgnoreCase(info.hashType) || !info.sha256.matches("(?i)[0-9a-f]{64}"))
