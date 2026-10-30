@@ -1,0 +1,43 @@
+name: Build and publish LiteDroid
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v1.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build APK
+        run: gradle --no-daemon assembleDebug
+
+      - name: Publish LiteDroid 1.0
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0
+          name: LiteDroid 1.0
+          body: |
+            First LiteDroid release.
+
+            Minimal F-Droid catalogue browser with app search, icons, descriptions and developer links.
+          files: app/build/outputs/apk/debug/app-debug.apk
+          make_latest: true
