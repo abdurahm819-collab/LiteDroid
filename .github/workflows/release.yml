@@ -27,29 +27,29 @@ jobs:
         with:
           gradle-version: '8.11.1'
 
-      - name: Build LiteDroid 1.6.1 Beta
+      - name: Build LiteDroid 1.6.2 Beta
         run: gradle --no-daemon assembleDebug
 
       - name: Prepare release APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk LiteDroid-1.6.1-beta.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk LiteDroid-1.6.2-beta.apk
 
-      - name: Publish LiteDroid 1.6.1 Beta
+      - name: Publish LiteDroid 1.6.2 Beta
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.6.1-beta
-          name: LiteDroid 1.6.1 Beta
+          tag_name: v1.6.2-beta
+          name: LiteDroid 1.6.2 Beta
           body: |
-            LiteDroid 1.6.1 Beta
+            LiteDroid 1.6.2 Beta
 
             This is a beta release: the core download and install flow works, but bugs may remain.
 
-            - Tests common search offset values and stops when the API ignores them.
+            - Uses F-Droid's paginated HTML search results because its basic JSON search API does not document pagination.
             - Improves package ID extraction from F-Droid search results and reports the exact package ID when no APK record matches.
             - Reads APK filenames and SHA-256 hashes from the signed F-Droid index.
             - Verifies the repository index signer and downloaded APK checksum before installation.
             - Loads screenshots only from the app's official screenshot gallery.
             - Keeps downloads on the official F-Droid repository.
             - Opens Android's system package installer for user confirmation.
-          files: LiteDroid-1.6.1-beta.apk
+          files: LiteDroid-1.6.2-beta.apk
           prerelease: true
           make_latest: true
