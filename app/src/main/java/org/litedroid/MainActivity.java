@@ -505,17 +505,30 @@ public class MainActivity extends Activity {
 
         worker.execute(() -> {
             try {
+                // Fetch APK metadata separately so a screenshot-page failure cannot disable downloads.
                 fetchOfficialPackageInfo(app);
+                runOnUiThread(() -> {
+                    if (!detailsVisible) return;
+                    apkStatus.setText("Latest official version: " + app.versionName + " (code " + app.versionCode + ").");
+                    download.setEnabled(!app.apkUrl.isEmpty());
+                });
+            } catch (Exception e) {
+                String reason = e.getMessage();
+                if (reason == null || reason.trim().isEmpty()) reason = e.getClass().getSimpleName();
+                final String error = reason;
+                runOnUiThread(() -> {
+                    if (detailsVisible) apkStatus.setText("APK info failed: " + error);
+                });
+            }
+
+            // Screenshots are optional. Their failure must not affect the APK button.
+            try {
                 String html = fetchText(PACKAGE_PAGE + Uri.encode(app.id));
                 List<String> images = findScreenshots(html, app.id);
                 app.screenshots.clear();
                 app.screenshots.addAll(images);
                 runOnUiThread(() -> {
                     if (!detailsVisible) return;
-                    apkStatus.setText(app.apkUrl.isEmpty()
-                            ? "F-Droid has no downloadable APK listed for this app."
-                            : "Latest official version: " + app.versionName + " (code " + app.versionCode + ").");
-                    download.setEnabled(!app.apkUrl.isEmpty());
                     if (!images.isEmpty()) {
                         screenshotLabel.setVisibility(View.VISIBLE);
                         for (String image : images) {
@@ -532,7 +545,7 @@ public class MainActivity extends Activity {
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> {
-                    if (detailsVisible) apkStatus.setText("Could not load app-page information. Check your connection.");
+                    if (detailsVisible) apkStatus.append("\nScreenshots unavailable (APK download can still work).");
                 });
             }
         });
