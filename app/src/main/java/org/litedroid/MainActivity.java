@@ -78,7 +78,8 @@ public class MainActivity extends Activity {
     static class AppEntry {
         String id="", name="", summary="", description="", icon="";
         String web="", source="", tracker="", donate="", license="";
-        String apkUrl="", versionName="";\n        long versionCode=0;
+        String apkUrl="", versionName="";
+        long versionCode=0;
         final List<String> screenshots = new ArrayList<>();
     }
 
