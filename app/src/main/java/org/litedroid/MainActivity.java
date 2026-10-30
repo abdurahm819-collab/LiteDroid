@@ -583,7 +583,9 @@ public class MainActivity extends Activity {
                 fetchOfficialPackageInfo(app);
                 runOnUiThread(() -> {
                     if (!detailsVisible) return;
-                    apkStatus.setText("Verified official version: " + app.versionName + " (code " + app.versionCode + "). APK checksum is ready.");
+                    String sizeLabel = formatFileSize(app.apkSize);
+                    apkStatus.setText("Verified official version: " + app.versionName + " (code " + app.versionCode + "). APK size: " + sizeLabel + ". SHA-256 checksum is ready.");
+                    download.setText("Download APK (" + sizeLabel + ")");
                     download.setEnabled(!app.apkUrl.isEmpty());
                 });
             } catch (Exception e) {
@@ -889,6 +891,13 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, -2);
         p.topMargin = dp(20); p.bottomMargin = dp(8); t.setLayoutParams(p);
         return t;
+    }
+
+    private static String formatFileSize(long bytes) {
+        if (bytes <= 0) return "Size unavailable";
+        if (bytes >= 1024L * 1024L) return String.format(Locale.ROOT, "%.1f MB", bytes / (1024.0 * 1024.0));
+        if (bytes >= 1024L) return String.format(Locale.ROOT, "%.0f KB", bytes / 1024.0);
+        return bytes + " B";
     }
 
     private TextView sectionText(String text) {

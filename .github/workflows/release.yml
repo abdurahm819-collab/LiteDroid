@@ -27,29 +27,31 @@ jobs:
         with:
           gradle-version: '8.11.1'
 
-      - name: Build LiteDroid 1.6.2 Beta
+      - name: Build LiteDroid 1.7.0 Stable
         run: gradle --no-daemon assembleDebug
 
       - name: Prepare release APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk LiteDroid-1.6.2-beta.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk LiteDroid-1.7.0.apk
 
-      - name: Publish LiteDroid 1.6.2 Beta
+      - name: Publish LiteDroid 1.7.0 Stable
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.6.2-beta
-          name: LiteDroid 1.6.2 Beta
+          tag_name: v1.7.0
+          name: LiteDroid 1.7.0 Stable
           body: |
-            LiteDroid 1.6.2 Beta
+            LiteDroid 1.7.0 Stable
 
-            This is a beta release: the core download and install flow works, but bugs may remain.
+            This is the stable LiteDroid 1.7.0 release.
 
-            - Uses F-Droid's paginated HTML search results because its basic JSON search API does not document pagination.
+            - Loads additional F-Droid search pages as you scroll, while releasing off-screen app icons from memory.
+            - Shows the verified APK file size in app details and on the download button.
+            - Uses your updated LiteDroid launcher icon.
             - Improves package ID extraction from F-Droid search results and reports the exact package ID when no APK record matches.
             - Reads APK filenames and SHA-256 hashes from the signed F-Droid index.
             - Verifies the repository index signer and downloaded APK checksum before installation.
             - Loads screenshots only from the app's official screenshot gallery.
             - Keeps downloads on the official F-Droid repository.
             - Opens Android's system package installer for user confirmation.
-          files: LiteDroid-1.6.2-beta.apk
-          prerelease: true
+          files: LiteDroid-1.7.0.apk
+          prerelease: false
           make_latest: true
