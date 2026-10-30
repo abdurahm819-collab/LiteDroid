@@ -288,7 +288,7 @@ public class MainActivity extends Activity {
 
     private static AppEntry parseSearchResult(JSONObject item) {
         AppEntry e = new AppEntry();
-        e.id = first(item, "packageName", "package_name", "id", "package", "appid");
+        e.id = normalizePackageId(first(item, "packageName", "package_name", "packageId", "package_id", "id", "package", "appid"));
         e.name = first(item, "name", "title", "label");
         if (e.name.isEmpty()) e.name = e.id;
         e.summary = first(item, "summary", "shortDescription", "short_description");
@@ -301,6 +301,19 @@ public class MainActivity extends Activity {
         e.donate = first(item, "donate", "donation");
         e.license = first(item, "license");
         return e;
+    }
+
+    private static String normalizePackageId(String value) {
+        if (value == null) return "";
+        String id = value.trim();
+        // Some search responses may provide an F-Droid package-page URL instead of the bare ID.
+        int marker = id.indexOf("/packages/");
+        if (marker >= 0) id = id.substring(marker + "/packages/".length());
+        int slash = id.indexOf('/');
+        if (slash >= 0) id = id.substring(0, slash);
+        int query = id.indexOf('?');
+        if (query >= 0) id = id.substring(0, query);
+        return id.trim();
     }
 
     private static String first(JSONObject object, String... keys) {
@@ -563,7 +576,7 @@ public class MainActivity extends Activity {
 
     private void fetchOfficialPackageInfo(AppEntry app) throws Exception {
         if (!app.id.matches("[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)+")) {
-            throw new Exception("Invalid F-Droid package ID.");
+            throw new Exception("Invalid package ID from search: [" + app.id + "].");
         }
         String jsonText = fetchText("https://f-droid.org/api/v1/packages/" + Uri.encode(app.id));
         JSONObject root = new JSONObject(jsonText);
@@ -597,17 +610,23 @@ public class MainActivity extends Activity {
         int start = html.indexOf("id=\"screenshots\"");
         if (start < 0) start = html.indexOf("id='screenshots'");
         if (start < 0) return result;
-        int end = html.indexOf("class=\"package-versions", start);
-        if (end < 0) end = Math.min(html.length(), start + 20000);
+        int end = html.indexOf("package-versions", start);
+        if (end < 0) end = Math.min(html.length(), start + 30000);
         String gallery = html.substring(start, end);
         Matcher tags = Pattern.compile("(?is)<img\\b[^>]*>").matcher(gallery);
         String expectedPrefix = "https://f-droid.org/repo/" + packageId + "/";
         while (tags.find() && result.size() < 8) {
-            String src = attribute(tags.group(), "src");
-            if (src.isEmpty()) src = attribute(tags.group(), "data-src");
+            String tag = tags.group();
+            String src = attribute(tag, "src");
+            if (src.isEmpty()) src = attribute(tag, "data-src");
+            if (src.isEmpty()) src = attribute(tag, "data-lazy-src");
             if (src.isEmpty()) continue;
-            String url = absoluteUrl(src);
+            String url = absoluteUrl(src.trim());
             String lower = url.toLowerCase(Locale.ROOT);
+            int queryAt = lower.indexOf('?');
+            if (queryAt >= 0) lower = lower.substring(0, queryAt);
+            int hashAt = lower.indexOf('#');
+            if (hashAt >= 0) lower = lower.substring(0, hashAt);
             if (url.startsWith(expectedPrefix) &&
                     (lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".jpeg")) &&
                     !result.contains(url)) result.add(url);
