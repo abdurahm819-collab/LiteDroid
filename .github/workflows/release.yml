@@ -27,19 +27,19 @@ jobs:
         with:
           gradle-version: '8.11.1'
 
-      - name: Build LiteDroid 1.6 Beta
+      - name: Build LiteDroid 1.6.1 Beta
         run: gradle --no-daemon assembleDebug
 
       - name: Prepare release APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk LiteDroid-1.6-beta.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk LiteDroid-1.6.1-beta.apk
 
-      - name: Publish LiteDroid 1.6 Beta
+      - name: Publish LiteDroid 1.6.1 Beta
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.6-beta
-          name: LiteDroid 1.6 Beta
+          tag_name: v1.6.1-beta
+          name: LiteDroid 1.6.1 Beta
           body: |
-            LiteDroid 1.6 Beta
+            LiteDroid 1.6.1 Beta
 
             This is a beta release: the core download and install flow works, but bugs may remain.
 
@@ -50,6 +50,6 @@ jobs:
             - Loads screenshots only from the app's official screenshot gallery.
             - Keeps downloads on the official F-Droid repository.
             - Opens Android's system package installer for user confirmation.
-          files: LiteDroid-1.6-beta.apk
+          files: LiteDroid-1.6.1-beta.apk
           prerelease: true
           make_latest: true
