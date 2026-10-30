@@ -6,6 +6,7 @@ import android.os.Bundle;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.text.Html;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.EditText;
@@ -23,20 +24,21 @@ import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLEncoder;
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class MainActivity extends Activity {
-    // Official F-Droid v2 repository index. This is the live catalogue source.
-    private static final String INDEX_URL = "https://f-droid.org/repo/index-v2.json";
+    // Official F-Droid full-text search API. Search responses are small;
+    // never download the entire repository index into the phone's memory.
+    private static final String SEARCH_URL = "https://search.f-droid.org/api/search_apps?q=";
     private static final String REPO_URL = "https://f-droid.org/repo/";
     private final ExecutorService worker = Executors.newFixedThreadPool(3);
+    private final AtomicInteger latestRequest = new AtomicInteger(0);
     private final List<AppEntry> apps = new ArrayList<>();
     private LinearLayout list;
     private EditText search;
@@ -44,8 +46,8 @@ public class MainActivity extends Activity {
     private ProgressBar progress;
 
     static class AppEntry {
-        String id, name, summary, description, icon;
-        String web, source, tracker, donate, license;
+        String id="", name="", summary="", description="", icon="";
+        String web="", source="", tracker="", donate="", license="";
     }
 
     @Override public void onCreate(Bundle state) {
@@ -74,7 +76,7 @@ public class MainActivity extends Activity {
         search = new EditText(this);
         search.setSingleLine(true);
         search.setTextSize(15);
-        search.setHint("Search apps…");
+        search.setHint("Search F-Droid apps…");
         search.setPadding(dp(14), 0, dp(14), 0);
         search.setBackground(round(Color.WHITE, 14));
         LinearLayout.LayoutParams searchParams = new LinearLayout.LayoutParams(-1, dp(50));
@@ -82,10 +84,9 @@ public class MainActivity extends Activity {
         root.addView(search, searchParams);
 
         status = new TextView(this);
-        status.setText("Connecting to F-Droid…");
+        status.setText("Search for an app to explore the F-Droid catalogue.");
         status.setTextColor(Color.DKGRAY);
         status.setTextSize(13);
-        status.setOnClickListener(v -> loadCatalogue());
         LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(-1, -2);
         statusParams.topMargin = dp(12);
         root.addView(status, statusParams);
@@ -95,6 +96,7 @@ public class MainActivity extends Activity {
         progressParams.gravity = Gravity.CENTER_HORIZONTAL;
         progressParams.topMargin = dp(8);
         root.addView(progress, progressParams);
+        progress.setVisibility(View.GONE);
 
         ScrollView scroll = new ScrollView(this);
         list = new LinearLayout(this);
@@ -106,65 +108,76 @@ public class MainActivity extends Activity {
 
         search.addTextChangedListener(new android.text.TextWatcher() {
             public void beforeTextChanged(CharSequence s, int st, int count, int after) {}
-            public void onTextChanged(CharSequence s, int start, int before, int count) { render(s.toString()); }
+            public void onTextChanged(CharSequence s, int start, int before, int count) { searchApps(s.toString()); }
             public void afterTextChanged(android.text.Editable e) {}
         });
-        loadCatalogue();
     }
 
-    private void loadCatalogue() {
+    private void searchApps(String rawQuery) {
+        String query = rawQuery.trim();
+        int requestId = latestRequest.incrementAndGet();
+        apps.clear();
+        list.removeAllViews();
+
+        if (query.length() < 2) {
+            progress.setVisibility(View.GONE);
+            status.setText("Type at least 2 characters to search F-Droid.");
+            return;
+        }
+
         progress.setVisibility(View.VISIBLE);
-        status.setText("Loading the official F-Droid catalogue…");
+        status.setText("Searching F-Droid for “" + query + "”…");
         worker.execute(() -> {
             HttpURLConnection connection = null;
             try {
-                connection = (HttpURLConnection) new URL(INDEX_URL).openConnection();
-                connection.setConnectTimeout(15000);
-                connection.setReadTimeout(45000);
-                connection.setRequestProperty("User-Agent", "LiteDroid/1.1");
+                String encoded = URLEncoder.encode(query, "UTF-8");
+                URL url = new URL(SEARCH_URL + encoded);
+                connection = (HttpURLConnection) url.openConnection();
+                connection.setConnectTimeout(10000);
+                connection.setReadTimeout(15000);
+                connection.setRequestProperty("User-Agent", "LiteDroid/1.2");
                 connection.setRequestProperty("Accept", "application/json");
                 int response = connection.getResponseCode();
-                if (response != HttpURLConnection.HTTP_OK) {
-                    throw new Exception("F-Droid server returned HTTP " + response);
-                }
+                if (response != HttpURLConnection.HTTP_OK)
+                    throw new Exception("F-Droid search returned HTTP " + response);
 
                 InputStream in = connection.getInputStream();
                 ByteArrayOutputStream out = new ByteArrayOutputStream();
-                byte[] buffer = new byte[16384];
+                byte[] buffer = new byte[8192];
                 int n;
-                while ((n = in.read(buffer)) != -1) out.write(buffer, 0, n);
+                while ((n = in.read(buffer)) != -1) {
+                    out.write(buffer, 0, n);
+                    if (out.size() > 3 * 1024 * 1024)
+                        throw new Exception("Search response was unexpectedly large.");
+                }
                 in.close();
 
-                JSONObject root = new JSONObject(out.toString("UTF-8"));
-                JSONObject appObject = root.optJSONObject("apps");
-                if (appObject == null) throw new Exception("The F-Droid index format was not recognised.");
+                Object json = new org.json.JSONTokener(out.toString("UTF-8")).nextValue();
+                JSONArray results = findResults(json);
+                if (results == null) throw new Exception("F-Droid returned an unexpected search response.");
 
-                List<AppEntry> loaded = new ArrayList<>();
-                Iterator<String> ids = appObject.keys();
-                while (ids.hasNext()) {
-                    String id = ids.next();
-                    JSONObject record = appObject.optJSONObject(id);
-                    if (record == null) continue;
-                    JSONObject metadata = record.optJSONObject("metadata");
-                    if (metadata == null) metadata = record;
-                    AppEntry entry = parseApp(metadata, id);
-                    if (!entry.name.isEmpty()) loaded.add(entry);
+                List<AppEntry> found = new ArrayList<>();
+                for (int i=0; i<results.length(); i++) {
+                    JSONObject item = results.optJSONObject(i);
+                    if (item == null) continue;
+                    AppEntry app = parseSearchResult(item);
+                    if (!app.name.isEmpty() || !app.id.isEmpty()) found.add(app);
                 }
 
-                if (loaded.isEmpty()) throw new Exception("F-Droid returned an empty app catalogue.");
-                Collections.sort(loaded, Comparator.comparing(x -> x.name.toLowerCase(Locale.ROOT)));
                 runOnUiThread(() -> {
+                    if (requestId != latestRequest.get()) return;
                     apps.clear();
-                    apps.addAll(loaded);
+                    apps.addAll(found);
                     progress.setVisibility(View.GONE);
-                    status.setText(apps.size() + " apps · Official F-Droid index · Tap to refresh");
-                    render(search.getText().toString());
+                    status.setText(found.size() + " results · Official F-Droid search");
+                    render();
                 });
             } catch (Exception ex) {
                 String message = ex.getMessage() == null ? "Network error" : ex.getMessage();
                 runOnUiThread(() -> {
+                    if (requestId != latestRequest.get()) return;
                     progress.setVisibility(View.GONE);
-                    status.setText("Could not load catalogue. Tap here to retry.");
+                    status.setText("Search failed. Check your connection and try again.");
                     Toast.makeText(this, message, Toast.LENGTH_LONG).show();
                 });
             } finally {
@@ -173,66 +186,82 @@ public class MainActivity extends Activity {
         });
     }
 
-    private static AppEntry parseApp(JSONObject metadata, String id) {
+    // Accept the common list wrappers used by search services without assuming
+    // the result list is always at the JSON document's top level.
+    private static JSONArray findResults(Object value) {
+        if (value instanceof JSONArray) return (JSONArray) value;
+        if (!(value instanceof JSONObject)) return null;
+        JSONObject object = (JSONObject) value;
+        String[] keys = {"results", "apps", "hits", "items", "data"};
+        for (String key : keys) {
+            Object child = object.opt(key);
+            if (child instanceof JSONArray) return (JSONArray) child;
+            if (child instanceof JSONObject) {
+                JSONArray nested = findResults(child);
+                if (nested != null) return nested;
+                JSONObject nestedObject = (JSONObject) child;
+                if (nestedObject.has("hits") && nestedObject.opt("hits") instanceof JSONObject) {
+                    JSONArray nestedHits = findResults(nestedObject.opt("hits"));
+                    if (nestedHits != null) return nestedHits;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static AppEntry parseSearchResult(JSONObject item) {
         AppEntry e = new AppEntry();
-        e.id = id;
-        e.name = localized(metadata, "name", id);
-        e.summary = localized(metadata, "summary", "");
-        e.description = localized(metadata, "description", e.summary);
-        e.icon = localized(metadata, "icon", "");
-        e.web = firstLocalized(metadata, "webSite", "website", "web");
-        e.source = firstLocalized(metadata, "sourceCode", "source");
-        e.tracker = firstLocalized(metadata, "issueTracker", "tracker");
-        e.donate = firstLocalized(metadata, "donate", "donation");
-        e.license = localized(metadata, "license", "");
+        e.id = first(item, "packageName", "package_name", "id", "package", "appid");
+        e.name = first(item, "name", "title", "label");
+        if (e.name.isEmpty()) e.name = e.id;
+        e.summary = first(item, "summary", "shortDescription", "short_description");
+        e.description = first(item, "description", "fullDescription", "full_description");
+        if (e.description.isEmpty()) e.description = e.summary;
+        e.icon = first(item, "icon", "iconUrl", "icon_url", "icon_path");
+        e.web = first(item, "webSite", "website", "web", "homepage");
+        e.source = first(item, "sourceCode", "source_code", "source");
+        e.tracker = first(item, "issueTracker", "issue_tracker", "tracker");
+        e.donate = first(item, "donate", "donation");
+        e.license = first(item, "license");
         return e;
     }
 
-    private static String firstLocalized(JSONObject object, String... keys) {
+    private static String first(JSONObject object, String... keys) {
         for (String key : keys) {
-            String value = localized(object, key, "");
+            String value = localized(object.opt(key));
             if (!value.isEmpty()) return value;
         }
         return "";
     }
 
-    private static String localized(JSONObject object, String key, String fallback) {
-        Object value = object.opt(key);
+    private static String localized(Object value) {
+        if (value == null || value == JSONObject.NULL) return "";
         if (value instanceof JSONObject) {
             JSONObject translations = (JSONObject) value;
             String best = translations.optString("en-US", "");
             if (best.isEmpty()) best = translations.optString("en", "");
             if (best.isEmpty()) {
-                Iterator<String> keys = translations.keys();
-                if (keys.hasNext()) best = translations.optString(keys.next(), "");
+                java.util.Iterator<String> keys = translations.keys();
+                if (keys.hasNext()) best = localized(translations.opt(keys.next()));
             }
-            return best.isEmpty() ? fallback : best;
+            return best.trim();
         }
-        if (value == null || value == JSONObject.NULL) return fallback;
-        String result = value.toString().trim();
-        return result.isEmpty() ? fallback : result;
+        if (value instanceof JSONArray) return "";
+        return value.toString().trim();
     }
 
-    private void render(String query) {
-        if (list == null) return;
+    private void render() {
         list.removeAllViews();
-        String q = query.toLowerCase(Locale.ROOT).trim();
-        int count = 0;
-        for (AppEntry e : apps) {
-            if (!(e.name.toLowerCase(Locale.ROOT).contains(q) ||
-                    e.id.toLowerCase(Locale.ROOT).contains(q) ||
-                    e.summary.toLowerCase(Locale.ROOT).contains(q))) continue;
-            list.addView(appCard(e));
-            count++;
-        }
-        if (count == 0 && !apps.isEmpty()) {
+        if (apps.isEmpty()) {
             TextView empty = new TextView(this);
-            empty.setText("No apps found");
+            empty.setText("No matching apps found.");
             empty.setTextColor(Color.GRAY);
             empty.setGravity(Gravity.CENTER);
             empty.setPadding(0, dp(35), 0, dp(35));
             list.addView(empty);
+            return;
         }
+        for (AppEntry app : apps) list.addView(appCard(app));
     }
 
     private View appCard(AppEntry e) {
@@ -273,25 +302,27 @@ public class MainActivity extends Activity {
 
     private void loadIcon(ImageView target, String path) {
         worker.execute(() -> {
+            HttpURLConnection c = null;
             try {
                 String clean = path.trim();
-                if (clean.startsWith("http://") || clean.startsWith("https://")) {
-                    // Only use HTTPS for remote catalogue images.
-                    if (!clean.startsWith("https://")) return;
-                } else {
+                if (clean.startsWith("http://")) return;
+                if (!clean.startsWith("https://")) {
                     while (clean.startsWith("/")) clean = clean.substring(1);
                     if (!clean.startsWith("icons/") && !clean.startsWith("icons-")) clean = "icons-640/" + clean;
                     clean = REPO_URL + clean;
                 }
-                HttpURLConnection c = (HttpURLConnection) new URL(clean).openConnection();
-                c.setConnectTimeout(7000);
-                c.setReadTimeout(7000);
+                c = (HttpURLConnection) new URL(clean).openConnection();
+                c.setConnectTimeout(5000);
+                c.setReadTimeout(5000);
+                c.setInstanceFollowRedirects(true);
                 InputStream in = c.getInputStream();
                 android.graphics.Bitmap bitmap = android.graphics.BitmapFactory.decodeStream(in);
                 in.close();
-                c.disconnect();
                 if (bitmap != null) runOnUiThread(() -> target.setImageBitmap(bitmap));
-            } catch (Exception ignored) {}
+            } catch (Exception ignored) {
+            } finally {
+                if (c != null) c.disconnect();
+            }
         });
     }
 
@@ -300,7 +331,7 @@ public class MainActivity extends Activity {
         body.setOrientation(LinearLayout.VERTICAL);
         body.setPadding(dp(20), dp(8), dp(20), dp(8));
         TextView description = new TextView(this);
-        description.setText(e.description.isEmpty() ? "No description provided." : e.description);
+        description.setText(Html.fromHtml(e.description.isEmpty() ? "No description provided." : e.description, Html.FROM_HTML_MODE_COMPACT));
         description.setTextSize(15);
         description.setTextColor(Color.rgb(45, 50, 58));
         body.addView(description);
@@ -347,6 +378,6 @@ public class MainActivity extends Activity {
     private int dp(int value) { return (int) (value * getResources().getDisplayMetrics().density + 0.5f); }
     @Override protected void onDestroy() {
         super.onDestroy();
-        worker.shutdown();
+        worker.shutdownNow();
     }
 }
